@@ -17,6 +17,7 @@ void setupWebServer() {
     Serial.println("Servidor web iniciado en puerto 80");
 }
 
+
 // ---- RUTA PRINCIPAL HTML ----
 void handleRoot() {
     server.send(200, "text/html", pageRootHTML());
@@ -24,7 +25,7 @@ void handleRoot() {
 
 // ---- JSON PARA EL PANEL ----
 void handleStatusJSON() {
-    JsonDocument doc;
+  DynamicJsonDocument doc(4096);
     doc["saleId"]            = estado.saleId;
     doc["saleRawJson"]       = estado.saleRawJson;
     doc["lastError"]         = estado.lastError;
@@ -32,7 +33,15 @@ void handleStatusJSON() {
     doc["lastProductCodigo"] = estado.lastProductCodigo;
     doc["lastProductName"] = estado.lastProductName;
     doc["lastProductStock"]  = estado.lastProductStock;
+    doc["lastProductSold"] = estado.lastProductSold;
     doc["lastProductId"]     = estado.lastProductId;
+
+  // Añadi modo y último botón IR para la UI
+  doc["mode"] = estado.mode; 
+  doc["lastIR"] = estado.lastIR;
+  doc["lastIRSeq"] = estado.lastIRSeq;
+  
+
 
     doc["wifiSSID"] = WiFi.SSID();
     doc["wifiRSSI"] = WiFi.RSSI();
@@ -158,6 +167,10 @@ String pageRootHTML() {
 
 <h2>📊 Panel ESP32 - Ventas</h2>
 
+<div style="text-align:center;margin-bottom:10px">
+  <button id="enableAudioBtn">Activar Sonido / Vibración</button>
+</div>
+
 <!-- INDICADOR WIFI -->
 <div id="wifiBox">
   <span id="wifiSignal">🟥🟥🟥🟥</span>
@@ -223,7 +236,56 @@ function notificarDesconexion(){
 }
 
 
-// ----------- CARGA DE ESTADO ------------
+// ----------- CARGA DE ESTADO y MENÚ ------------
+
+// menú eliminado
+let prevSaleId = 0;
+let prevStockZero = false;
+let prevLastIR = '';
+let prevLastIRSeq = -1;
+let audioEnabled = false;
+let userInteracted = false;
+
+function speakIfAllowed(text, mode){
+  if (!('speechSynthesis' in window)) return;
+  // requiere interacción del usuario para permitir reproducción en muchos navegadores
+  if (!audioEnabled || !userInteracted) return;
+  if (mode === 0) {
+    const u = new SpeechSynthesisUtterance(text);
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  }
+}
+
+function vibrateIfAllowed(patternOrMs, mode) {
+  if (!('vibrate' in navigator)) return;
+  if (!userInteracted) return;
+  if (mode === 0) {
+    navigator.vibrate(patternOrMs);
+  }
+}
+
+// Botón para activar permisos audio/vibración
+document.addEventListener('DOMContentLoaded', ()=>{
+  const btn = document.getElementById('enableAudioBtn');
+  btn.addEventListener('click', ()=>{
+    userInteracted = true;
+    audioEnabled = true;
+    // prueba corta
+    if ('speechSynthesis' in window) {
+      const u = new SpeechSynthesisUtterance('Sonido activado');
+      window.speechSynthesis.speak(u);
+    }
+    if ('vibrate' in navigator) navigator.vibrate(80);
+    btn.textContent = 'Sonido activado';
+    btn.disabled = true;
+  });
+  // marcar interacción si el usuario toca cualquier parte
+  window.addEventListener('touchstart', ()=>{ userInteracted = true; }, {once:true});
+  window.addEventListener('click', ()=>{ userInteracted = true; }, {once:true});
+});
+
+
 
 async function load(){
   try{
@@ -236,19 +298,21 @@ async function load(){
     let ventaHTML = `
       <div class="title">🧾 Última Venta</div>
       <div>ID de venta: <span class="tag">${j.saleId}</span></div>
-      <div>Cantidad vendida: <span class="tag">${j.lastProductStock}</span></div>
+      <div>Cantidad vendida: <span class="tag">${j.lastProductSold}</span></div>
     `;
 
     // ----- TARJETA PRODUCTO -----
     let productoHTML = `
       <div class="title">📦 Producto vendido</div>
-      <div>Nombre: <span class="tag">${j.lastProductName || "-"}</span></div>
-      <div>Código: <span class="tag">${j.lastProductCodigo || "-"}</span></div>
+      <div>Nombre: <span class="tag">${j.lastProductName || '-'} </span></div>
+      <div>Código: <span class="tag">${j.lastProductCodigo || '-'} </span></div>
     `;
 
     // ----- TARJETA ESTADO -----
+    let modoText = (j.mode===0)? 'Normal' : (j.mode===1)? 'SOLO LED' : 'Silencio';
     let estadoHTML = `
       <div class="title">📟 Estado</div>
+      <div>Modo: <span class="tag">${modoText}</span></div>
     `;
 
     if (j.saleId === 0) {
@@ -262,7 +326,7 @@ async function load(){
       estadoHTML += `<div class="error">✘ ${errorText}</div>`;
     }
 
-    // Anti-parpadeo
+    // Anti-parpadeo para estado
     const estadoCard = document.getElementById("estadoCard");
     if (estadoCard.dataset.last !== estadoHTML) {
         estadoCard.innerHTML = estadoHTML;
@@ -271,6 +335,27 @@ async function load(){
 
     document.getElementById("ventaCard").innerHTML = ventaHTML;
     document.getElementById("productoCard").innerHTML = productoHTML;
+
+
+    // Reproducir voz según modo y cambios
+    if (j.saleId !== prevSaleId) {
+      if (j.saleId !== 0 && j.lastSaleSuccess) {
+        speakIfAllowed('nueva venta proesada', j.mode);
+        vibrateIfAllowed(300, j.mode);
+      }
+      prevSaleId = j.saleId;
+    }
+                                                                                         
+    // Notificar sin stock
+    if (j.lastProductStock <= 0) {
+      if (!prevStockZero) {
+        speakIfAllowed('Producto sin stock', j.mode);
+        vibrateIfAllowed([200,150,200], j.mode);
+        prevStockZero = true;
+      }
+    } else {
+      prevStockZero = false;
+    }
 
     setTimeout(()=>{
       document.getElementById("wifiBox").classList.add("show");
@@ -284,7 +369,7 @@ async function load(){
   }
 }
 
-setInterval(load, 4000);
+setInterval(load, 800);
 load();
 
 </script>

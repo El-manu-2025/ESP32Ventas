@@ -1,9 +1,9 @@
 #include <Arduino.h>
 #include "vibracion.h"
 
-const int VIB_PIN = 15;
 
- 
+#define VIB_PIN 13
+
 void vibrarPulso(unsigned long ms) {
   digitalWrite(VIB_PIN, HIGH);
   delay(ms);

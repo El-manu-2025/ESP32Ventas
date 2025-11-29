@@ -1,5 +1,5 @@
 #ifndef CONFIG_H
-#define CONFIG_H
+#define CONFIG_HA
 
 #include <Arduino.h>
 #include "api_utils.h"  

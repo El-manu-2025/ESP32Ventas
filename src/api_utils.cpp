@@ -1,3 +1,4 @@
+// api_utils.cpp
 #include "api_utils.h"
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -8,6 +9,11 @@
 #include "vibracion.h"
 #include "config.h"
 
+// notificadores implementados en main.cpp
+extern void notifySaleOnce();
+extern void notifyStockZero();
+extern void notifyProductInvalid();
+
 // ===========================
 // VARIABLES GLOBALES
 // ===========================
@@ -16,7 +22,6 @@ unsigned long tokenObtainedAt = 0;
 bool yaVibroSinStock = false;
 bool yaVibroProductoInvalido = false;
 
-
 // Declarados en config.cpp
 extern const String API_BASE;
 extern const String TOKEN_ENDPOINT;
@@ -24,8 +29,7 @@ extern const String VENTAS_LATEST_ENDPOINT;
 
 // Estructura Estado
 extern Estado estado;
-
-
+extern long lastSaleId; 
 
 // ===========================
 // TOKEN TTL
@@ -33,13 +37,12 @@ extern Estado estado;
 static const unsigned long TOKEN_REAL_TTL_MS = 15UL * 60UL * 1000UL;
 static const unsigned long TOKEN_MARGIN_MS   = 3UL * 60UL * 1000UL;
 
-// Helper
 static inline bool timeout_passed(unsigned long start, unsigned long ms) {
     return (millis() - start) >= ms;
 }
 
 // ==========================================================
-//   OBTENER PRODUCTO 
+//   OBTENER PRODUCTO
 // ==========================================================
 bool obtenerProducto(const String &productoUrl, String &nombreProducto, long &productoCodigo, long &productoId, int &stockProducto ) {
 
@@ -48,7 +51,7 @@ bool obtenerProducto(const String &productoUrl, String &nombreProducto, long &pr
         return false;
     }
 
-    // Convertir http → https automáticamente
+    // Convertir http → https 
     String httpsUrl = productoUrl;
     httpsUrl.replace("http://", "https://");
 
@@ -97,25 +100,39 @@ bool obtenerProducto(const String &productoUrl, String &nombreProducto, long &pr
     }
 
     // ------------------------------------------------------
-    // EXTRAER DATOS REALES DEL PRODUCTO
+    // EXTRAER DATOS DEL PRODUCTO
     // ------------------------------------------------------
-
     nombreProducto = doc["nombre"].as<String>();
-    productoCodigo = doc["codigo"].as<long>();
 
-    // Extraer el ID REAL usando la URL
+    // Código del producto
+    productoCodigo = doc["codigo"].is<int>() ? doc["codigo"].as<long>() : String(doc["codigo"].as<const char*>()).toInt();
+
+    // Extraer el ID usando la URL
     String urlCompleta = doc["url"].as<String>();   
     int pos1 = urlCompleta.lastIndexOf('/', urlCompleta.length() - 2);
     int pos2 = urlCompleta.lastIndexOf('/');
     String idStr = urlCompleta.substring(pos1 + 1, pos2);
-
     productoId = idStr.toInt(); 
-    stockProducto = doc["stock"].as<int>();
+
+    // STOCK: puede se llama "cantidad" = "stock" segun mi API — intento ambos
+    if (doc.containsKey("stock")) {
+        stockProducto = doc["stock"] | 0;
+    } else if (doc.containsKey("cantidad")) {
+        stockProducto = doc["cantidad"] | 0;
+    } else {
+        stockProducto = 0;
+    }
 
     http.end();
     return true;
 }
 
+
+
+bool obtenerProducto(const String &productoUrl, String &nombreProducto, long &productoCodigo, long &productoId) {
+    int dummyStock = 0;
+    return obtenerProducto(productoUrl, nombreProducto, productoCodigo, productoId, dummyStock);
+}
 
 // ==========================================================
 //   POLL
@@ -202,7 +219,7 @@ bool consultarEndpointVentas(const String &url) {
 
         JsonObject venta = arr[0];
 
-        // ===== EXTRAER SALE ID ====
+        // ===== EXTRAER ID ====
         String ventaUrl = venta["url"].as<String>();
         ventaUrl.trim();
         if (ventaUrl.endsWith("/")) ventaUrl.remove(ventaUrl.length() - 1);
@@ -221,8 +238,9 @@ bool consultarEndpointVentas(const String &url) {
             return false;
         }
 
+        // Notificar nueva venta
         if (saleIdLong != lastSaleId) {
-            vibrarUnaVez();
+            notifySaleOnce();
         }
 
         lastSaleId = saleIdLong;
@@ -239,7 +257,7 @@ bool consultarEndpointVentas(const String &url) {
             String productoUrl = det["producto"].as<String>();
             int cantidadVendida = det["cantidad"] | 0;
 
-            estado.lastProductStock = cantidadVendida;
+            estado.lastProductSold = cantidadVendida;
 
             long urlProductoId = -1;
             {
@@ -262,27 +280,24 @@ bool consultarEndpointVentas(const String &url) {
                 estado.lastProductName   = nombreProducto;
                 estado.lastProductStock  = stockReal;
 
-                // --- STOCK 0 ---
                 if (estado.lastProductStock <= 0) {
                     if (!yaVibroSinStock) {
-                        vibrarDosVeces();
+                        notifyStockZero();
                         yaVibroSinStock = true;
                     }
                 } else {
-                    // Si vuelve a tener stock, reinicia la bandera
                     yaVibroSinStock = false;
                 }
 
-                // Como el producto SÍ existe, resetea el flag de producto inválido
+        
                 yaVibroProductoInvalido = false;
 
             } else {
                 estado.lastProductCodigo = "Desconocido";
                 estado.lastProductId = (urlProductoId > 0 ? urlProductoId : -1);
 
-                // --- PRODUCTO INVALIDO ---
                 if (!yaVibroProductoInvalido) {
-                    vibrarDosVeces();
+                    notifyProductInvalid();
                     yaVibroProductoInvalido = true;
                 }
             }
@@ -290,6 +305,7 @@ bool consultarEndpointVentas(const String &url) {
         } else {
             estado.lastProductCodigo = "";
             estado.lastProductStock = 0;
+            estado.lastProductSold = 0;
             estado.lastProductId = -1;
         }
 
@@ -300,7 +316,6 @@ bool consultarEndpointVentas(const String &url) {
 
     return doRequest(true);
 }
-
 
 // ==========================================================
 //   🔥 FUNCIÓN tokenValido()
@@ -347,7 +362,7 @@ bool obtainToken() {
     }
 
     String resp = http.getString();
-    JsonDocument doc;
+    DynamicJsonDocument doc(1024);
 
     if (deserializeJson(doc, resp)) {
         estado.lastError = "Parse token";
